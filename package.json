@@ -1,0 +1,51 @@
+{
+  "name": "clearbrief",
+  "version": "1.1.0",
+  "description": "MCP plugin for Claude and Codex that summarizes session transcripts in plain English and cuts context token usage.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "clearbrief": "./src/server.js",
+    "clearbrief-install": "./scripts/install.js"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "skills",
+    "agents",
+    "hooks",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".mcp.json",
+    ".mcp.codex.json"
+  ],
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "bench": "node scripts/bench.js",
+    "check": "node scripts/install.js --check",
+    "install:claude": "node scripts/install.js --claude",
+    "install:codex": "node scripts/install.js --codex",
+    "install:all": "node scripts/install.js --all"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "codex",
+    "claude-plugin",
+    "codex-plugin",
+    "token-compression"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saiswaroopkakuru/clearbrief.git"
+  },
+  "homepage": "https://github.com/saiswaroopkakuru/clearbrief#readme",
+  "bugs": {
+    "url": "https://github.com/saiswaroopkakuru/clearbrief/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

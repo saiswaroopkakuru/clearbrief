@@ -1,0 +1,11 @@
+{
+  "name": "clearbrief-local",
+  "owner": { "name": "SaiReddy" },
+  "plugins": [
+    {
+      "name": "clearbrief",
+      "source": "./",
+      "description": "Reads Claude & Codex chats, cuts token usage, rewrites technical outputs into clear human language."
+    }
+  ]
+}

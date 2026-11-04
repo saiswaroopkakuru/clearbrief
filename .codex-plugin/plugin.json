@@ -1,0 +1,7 @@
+{
+  "name": "clearbrief",
+  "version": "1.0.0",
+  "description": "Reads Claude & Codex chats, cuts token usage by 65-95%, rewrites technical outputs into clear human language, and adapts skills to your active main interface.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.codex.json"
+}
