@@ -6,7 +6,7 @@ import { countTokens, fitBudget } from './compress.js';
 import { summarizeChat, summarizeOutput } from './digest.js';
 import { detectUI, renderDigest } from './ui.js';
 
-const SERVER = { name: 'clearbrief', version: '1.1.0' };
+const SERVER = { name: 'clearbrief', version: '1.2.0' };
 const PROTOCOLS = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']);
 
 // Kept under 300 tokens total because MCP hosts send tool schemas on every turn.

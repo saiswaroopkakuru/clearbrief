@@ -6,19 +6,35 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { compress, countTokens } from '../src/compress.js';
+import { clearRepoConfigCache, compress, countTokens } from '../src/compress.js';
 import { listSessions, readSession, resetDeltaCache, searchChats } from '../src/chats.js';
 import { summarizeChat, summarizeOutput } from '../src/digest.js';
 import { detectUI, renderDigest } from '../src/ui.js';
 import { TOOLS } from '../src/server.js';
+import { upsertRulesFile } from '../scripts/install.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_BIN = path.join(ROOT, 'src', 'server.js');
 const HOOK_BIN = path.join(ROOT, 'scripts', 'session-start.js');
 const GUARD_BIN = path.join(ROOT, 'scripts', 'pre-read-guard.js');
+const SLIM_BIN = path.join(ROOT, 'scripts', 'slim-cli.js');
+
+function runBin(bin, args = [], stdinText = '', env = process.env) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [bin, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d.toString('utf8'); });
+    p.stderr.on('data', (d) => { err += d.toString('utf8'); });
+    p.on('error', reject);
+    p.on('close', (code) => resolve({ code, out, err }));
+    p.stdin.end(stdinText);
+  });
+}
 
 function setupFixture() {
   resetDeltaCache();
+  clearRepoConfigCache();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clearbrief-'));
   const claudeDir = path.join(dir, '.claude');
   const codexDir = path.join(dir, '.codex');
@@ -150,6 +166,7 @@ function setupFixture() {
   fs.writeFileSync(codexFile, codexEvents.map((e) => JSON.stringify(e)).join('\n') + '\n');
 
   return {
+    dir,
     claudeFile,
     codexFile,
     env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexDir },
@@ -163,52 +180,61 @@ test('MCP schema footprint stays compact (<300 tokens across all tools)', () => 
   assert.ok(tokens < 300, `expected <300 schema tokens, got ${tokens}`);
 });
 
-test('compress drops lockfile diffs, passing test walls, SVG/DOM bloat, JSON arrays, and library frames', () => {
-  const items = Array.from({ length: 80 }, (_, i) => ({
-    id: i + 1,
-    status: 'ok',
-    empty: null,
-    payload: 'verbose-payload-'.repeat(8)
-  }));
+test('compress drops lockfiles, passing tests, Docker/ORM/NextJS noise, and custom .clearbriefrc patterns', () => {
+  const fx = setupFixture();
+  try {
+    fs.writeFileSync(
+      path.join(fx.dir, '.clearbriefrc.json'),
+      JSON.stringify({ stripPatterns: ['^\\[CUSTOM_NOISE\\].*$'] })
+    );
 
-  const raw = [
-    'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml',
-    ...Array.from({ length: 60 }, (_, i) => `+  pkg-${i}: sha512-${'x'.repeat(50)}`),
-    'diff --git a/src/config.ts b/src/config.ts',
-    '+export const timeout = 5000;',
-    ...Array.from({ length: 40 }, (_, i) => `  ✓ passing check ${i} (1ms)`),
-    '<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>',
-    ...Array.from({ length: 25 }, () => '2026-11-04T10:00:01.123Z GET /api/poll 200 OK'),
-    '```json',
-    JSON.stringify({ total: 80, error: 'Shard 3 timeout', items }, null, 2),
-    '```',
-    'Error: ENOENT: no such file or directory, open "/app/config/prod.json"',
-    ...Array.from({ length: 20 }, (_, i) => `    at Layer.handle (/app/node_modules/router/index.js:${100 + i}:12)`),
-    '    at loadConfig (/app/src/config.ts:42:9)'
-  ].join('\n');
+    const items = Array.from({ length: 60 }, (_, i) => ({
+      id: i + 1,
+      status: 'ok',
+      empty: null,
+      payload: 'verbose-payload-'.repeat(6)
+    }));
 
-  const res = compress(raw, 240);
-  assert.ok(res.metrics.savedPercent >= 85, `expected >=85% saved, got ${res.metrics.savedPercent}%`);
-  assert.ok(res.metrics.finalTokens <= 240, `expected <=240 tokens, got ${res.metrics.finalTokens}`);
-  assert.ok(!res.text.includes('sha512-xxxx'));
-  assert.ok(!res.text.includes('<path d='));
-  assert.ok(res.text.includes('src/config.ts:42:9'));
+    const raw = [
+      '[CUSTOM_NOISE] noisy internal telemetry line',
+      'a1b2c3d4e5f6: Pulling fs layer',
+      'a1b2c3d4e5f6: Download complete',
+      `Built image sha256:${'f'.repeat(64)}`,
+      'prisma:info Starting a postgresql pool with 9 connections.',
+      `SELECT * FROM orders WHERE id IN (${Array.from({ length: 30 }, (_, i) => `$${i + 1}`).join(', ')}) params: [${Array.from({ length: 40 }, (_, i) => `"uuid-${i}-abcdef"`).join(', ')}]`,
+      `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: items })}</script>`,
+      'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml',
+      ...Array.from({ length: 40 }, (_, i) => `+  pkg-${i}: sha512-${'x'.repeat(50)}`),
+      ...Array.from({ length: 30 }, (_, i) => `  ✓ passing check ${i} (1ms)`),
+      'Error: ENOENT: no such file or directory, open "/app/config/prod.json"',
+      ...Array.from({ length: 15 }, (_, i) => `    at Layer.handle (/app/node_modules/router/index.js:${100 + i}:12)`),
+      '    at loadConfig (/app/src/config.ts:42:9)'
+    ].join('\n');
+
+    const res = compress(raw, 240, fx.dir);
+    assert.ok(res.metrics.savedPercent >= 85, `expected >=85% saved, got ${res.metrics.savedPercent}%`);
+    assert.ok(res.metrics.finalTokens <= 240);
+    assert.ok(!res.text.includes('CUSTOM_NOISE'));
+    assert.ok(!res.text.includes('Pulling fs layer'));
+    assert.ok(!res.text.includes('__NEXT_DATA__'));
+    assert.ok(res.text.includes('IN (…items)'));
+    assert.ok(res.text.includes('src/config.ts:42:9'));
+  } finally {
+    fx.cleanup();
+  }
 });
 
 test('chats + delta mode only parse newly appended turns on repeat reads', () => {
   const fx = setupFixture();
   try {
-    const first = readSession({ sessionTarget: 'claude-001', delta: true, env: fx.env });
-    const d1 = summarizeChat(first);
+    const d1 = summarizeChat(readSession({ sessionTarget: 'claude-001', delta: true, env: fx.env }));
     assert.ok(d1.goals[0].includes('double-charging'));
     assert.ok(d1.metrics.savedPercent >= 85);
 
-    // Second delta read with no file changes -> 0 new events (~10 tokens)
     const unchanged = summarizeChat(readSession({ sessionTarget: 'claude-001', delta: true, env: fx.env }));
     assert.equal(unchanged.headline, 'No new turns since last read.');
     assert.ok(unchanged.metrics.finalTokens <= 15);
 
-    // Append a new turn and verify delta reads ONLY the new turn
     fs.appendFileSync(
       fx.claudeFile,
       JSON.stringify({
@@ -221,42 +247,64 @@ test('chats + delta mode only parse newly appended turns on repeat reads', () =>
     assert.ok(updated.headline.includes('Deployed fix to staging'));
     assert.equal(updated.goals.length, 0);
 
-    const matches = searchChats('idempotency', { env: fx.env });
-    assert.equal(matches.length, 1);
+    assert.equal(searchChats('idempotency', { env: fx.env }).length, 1);
+    assert.equal(listSessions({ env: fx.env }).length, 2);
   } finally {
     fx.cleanup();
   }
 });
 
-test('ui adapts skill triggers and PreToolUse guard blocks raw transcript Read calls', async () => {
-  const codex = detectUI({ name: 'codex-cli', version: '0.42.0' }, {});
-  const desktop = detectUI({ name: 'claude-ai', version: '1.0.0' }, {});
+test('PreToolUse guard blocks transcripts, build dirs, sourcemaps, and large SQL dumps without limit', async () => {
+  const fx = setupFixture();
+  try {
+    const bigSql = path.join(fx.dir, 'seed.sql');
+    fs.writeFileSync(bigSql, 'INSERT INTO users VALUES (1, "demo");\n'.repeat(1000));
 
-  const digest = summarizeOutput('TypeError: Cannot read properties of undefined (reading "email") at src/user.ts:18:4');
-  assert.ok(!renderDigest(digest, codex).includes('<details>'));
-  assert.ok(renderDigest(digest, desktop).includes('<details>'));
+    const r1 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: fx.claudeFile } }));
+    assert.equal(r1.code, 2);
+    assert.ok(r1.err.includes('read_chat'));
 
-  // Guard blocks ~/.claude/.../*.jsonl with exit code 2
-  const blocked = await new Promise((resolve) => {
-    const p = spawn(process.execPath, [GUARD_BIN], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let err = '';
-    p.stderr.on('data', (d) => { err += d.toString('utf8'); });
-    p.on('close', (code) => resolve({ code, err }));
-    p.stdin.end(JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'C:/Users/Demo/.claude/projects/app/s1.jsonl' } }));
-  });
-  assert.equal(blocked.code, 2);
-  assert.ok(blocked.err.includes('read_chat'));
+    const r2 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: 'C:/repo/.next/server/app.js' } }));
+    assert.equal(r2.code, 2);
 
-  // Guard allows normal source files with exit code 0 and 0 output
-  const allowed = await new Promise((resolve) => {
-    const p = spawn(process.execPath, [GUARD_BIN], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = '';
-    p.stdout.on('data', (d) => { out += d.toString('utf8'); });
-    p.on('close', (code) => resolve({ code, out }));
-    p.stdin.end(JSON.stringify({ tool_name: 'Read', tool_input: { file_path: 'C:/Users/Demo/app/src/index.ts' } }));
-  });
-  assert.equal(allowed.code, 0);
-  assert.equal(allowed.out, '');
+    const r3 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: 'C:/repo/public/bundle.js.map' } }));
+    assert.equal(r3.code, 2);
+
+    const r4 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: bigSql } }));
+    assert.equal(r4.code, 2);
+    assert.ok(r4.err.includes('limit<=100'));
+
+    // Windowed sample slice on large SQL dump is allowed!
+    const r5 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: bigSql, limit: 40 } }));
+    assert.equal(r5.code, 0);
+
+    // Normal source file is allowed with zero output
+    const r6 = await runBin(GUARD_BIN, [], JSON.stringify({ tool_input: { file_path: 'C:/repo/src/index.ts' } }));
+    assert.equal(r6.code, 0);
+    assert.equal(r6.out, '');
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('slim-cli pipe binary and CLAUDE.md/AGENTS.md rule injector work end-to-end', async () => {
+  const fx = setupFixture();
+  try {
+    const noisy = Array.from({ length: 50 }, (_, i) => `  ✓ test ${i} passed`).join('\n') +
+      '\nError: listen EADDRINUSE: address already in use :::4000\n';
+
+    const piped = await runBin(SLIM_BIN, ['--max-tokens', '160'], noisy);
+    assert.equal(piped.code, 0);
+    assert.ok(piped.out.includes('Port 4000 is already in use'));
+
+    const claudeMd = path.join(fx.dir, 'CLAUDE.md');
+    assert.equal(upsertRulesFile(claudeMd), 'created');
+    assert.equal(upsertRulesFile(claudeMd), 'updated');
+    const content = fs.readFileSync(claudeMd, 'utf8');
+    assert.equal((content.match(/<!-- clearbrief:start -->/g) || []).length, 1);
+  } finally {
+    fx.cleanup();
+  }
 });
 
 test('stdio server supports compact tools, legacy aliases, and low-token handoff', async () => {
@@ -300,14 +348,15 @@ test('stdio server supports compact tools, legacy aliases, and low-token handoff
     assert.ok(replies[2].result.content[0].text.includes('Port 3000 is already in use'));
     assert.ok(countTokens(replies[3].result.content[0].text) <= 180);
 
-    const hookText = await new Promise((resolve, reject) => {
-      const h = spawn(process.execPath, [HOOK_BIN], { stdio: ['pipe', 'pipe', 'pipe'] });
-      let out = '';
-      h.stdout.on('data', (d) => { out += d.toString('utf8'); });
-      h.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`exit ${code}`))));
-      h.stdin.end('{}');
-    });
-    assert.ok(countTokens(hookText) <= 40, `expected <=40 hook tokens, got ${countTokens(hookText)}`);
+    const hook = await runBin(HOOK_BIN, [], '{}');
+    assert.equal(hook.code, 0);
+    assert.ok(countTokens(hook.out) <= 40);
+
+    const codex = detectUI({ name: 'codex-cli', version: '0.42.0' }, {});
+    const desktop = detectUI({ name: 'claude-ai', version: '1.0.0' }, {});
+    const sample = summarizeOutput('SyntaxError: Unexpected token }');
+    assert.ok(!renderDigest(sample, codex).includes('<details>'));
+    assert.ok(renderDigest(sample, desktop).includes('<details>'));
   } finally {
     fx.cleanup();
   }

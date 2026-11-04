@@ -1,16 +1,18 @@
 {
   "name": "clearbrief",
-  "version": "1.1.0",
-  "description": "MCP plugin for Claude and Codex that summarizes session transcripts in plain English and cuts context token usage.",
+  "version": "1.2.0",
+  "description": "Proactive low-token MCP plugin and CLI filter for Claude and Codex that summarizes session transcripts in plain English and cuts context bloat.",
   "type": "module",
   "main": "src/server.js",
   "bin": {
     "clearbrief": "./src/server.js",
+    "clearbrief-slim": "./scripts/slim-cli.js",
     "clearbrief-install": "./scripts/install.js"
   },
   "files": [
     "src",
     "scripts",
+    "templates",
     "skills",
     "agents",
     "hooks",
@@ -24,6 +26,7 @@
     "test": "node --test test/*.test.js",
     "bench": "node scripts/bench.js",
     "check": "node scripts/install.js --check",
+    "init:rules": "node scripts/install.js --rules",
     "install:claude": "node scripts/install.js --claude",
     "install:codex": "node scripts/install.js --codex",
     "install:all": "node scripts/install.js --all"

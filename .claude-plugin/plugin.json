@@ -1,7 +1,7 @@
 {
   "$schema": "https://claude-code.json/schemas/plugin.json",
   "name": "clearbrief",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Reads Claude & Codex chats, cuts token usage by 65-95%, rewrites technical outputs into clear human language, and adapts skills to your active main interface.",
   "author": {
     "name": "saiswaroopkakuru",

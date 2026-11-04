@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { createServer } from '../src/server.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER_FILE = path.join(ROOT, 'src', 'server.js');
+const RULES_TEMPLATE = path.join(ROOT, 'templates', 'RULES.md');
 
 const REQUIRED = [
   '.claude-plugin/plugin.json',
@@ -17,6 +19,8 @@ const REQUIRED = [
   'src/server.js',
   'scripts/session-start.js',
   'scripts/pre-read-guard.js',
+  'scripts/slim-cli.js',
+  'templates/RULES.md',
   'skills/humanize-chat/SKILL.md',
   'skills/token-diet/SKILL.md',
   'skills/cross-chat-handoff/SKILL.md',
@@ -45,6 +49,53 @@ function check() {
 
   console.log(`ok  ${init.result.serverInfo.name}@${init.result.serverInfo.version} (${ROOT})`);
   console.log(`    tools: ${list.result.tools.map((t) => t.name).join(', ')}`);
+}
+
+export function upsertRulesFile(targetFile) {
+  const snippet = fs.readFileSync(RULES_TEMPLATE, 'utf8').trim();
+  fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+
+  if (!fs.existsSync(targetFile)) {
+    fs.writeFileSync(targetFile, `${snippet}\n`, 'utf8');
+    return 'created';
+  }
+
+  const existing = fs.readFileSync(targetFile, 'utf8');
+  const markerRe = /<!-- clearbrief:start -->[\s\S]*?<!-- clearbrief:end -->/;
+  if (markerRe.test(existing)) {
+    fs.writeFileSync(targetFile, existing.replace(markerRe, snippet), 'utf8');
+    return 'updated';
+  }
+
+  fs.writeFileSync(targetFile, `${existing.trimEnd()}\n\n${snippet}\n`, 'utf8');
+  return 'appended';
+}
+
+function installRules(targetDir) {
+  const dir = path.resolve(targetDir || process.cwd());
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+    const file = path.join(dir, name);
+    const status = upsertRulesFile(file);
+    console.log(`${status} ${file}`);
+  }
+}
+
+function installGlobalRules() {
+  const home = os.homedir();
+  const claudeMd = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'CLAUDE.md');
+  const codexMd = path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'AGENTS.md');
+  console.log(`${upsertRulesFile(claudeMd)} ${claudeMd}`);
+  console.log(`${upsertRulesFile(codexMd)} ${codexMd}`);
+}
+
+function installGitAlias() {
+  execFileSync('git', [
+    'config',
+    '--global',
+    'alias.sdiff',
+    'diff -- . ":(exclude)*lock*" ":(exclude)*.map" ":(exclude)dist/*" ":(exclude).next/*"'
+  ]);
+  console.log('configured global `git sdiff` alias (excludes lockfiles, sourcemaps, dist/, .next/)');
 }
 
 function installCodex() {
@@ -82,7 +133,18 @@ function printClaudeSetup() {
   console.log(JSON.stringify({ mcpServers: { clearbrief: { command: 'node', args: [SERVER_FILE] } } }, null, 2));
 }
 
-const flags = new Set(process.argv.slice(2));
-if (!flags.size || flags.has('--check')) check();
-if (flags.has('--codex') || flags.has('--all')) installCodex();
-if (flags.has('--claude') || flags.has('--all')) printClaudeSetup();
+const selfPath = fileURLToPath(import.meta.url);
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(selfPath)) {
+  const argv = process.argv.slice(2);
+  const flags = new Set(argv);
+  if (!argv.length || flags.has('--check')) check();
+  if (flags.has('--codex') || flags.has('--all')) installCodex();
+  if (flags.has('--claude') || flags.has('--all')) printClaudeSetup();
+  if (flags.has('--rules')) {
+    const idx = argv.indexOf('--rules');
+    const next = argv[idx + 1];
+    installRules(next && !next.startsWith('--') ? next : process.cwd());
+  }
+  if (flags.has('--global-rules')) installGlobalRules();
+  if (flags.has('--git-alias')) installGitAlias();
+}

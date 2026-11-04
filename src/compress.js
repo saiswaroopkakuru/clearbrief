@@ -1,22 +1,73 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 const ANSI_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const THINKING_RE = /<(?:thinking|antml:thinking|reasoning)>[\s\S]*?<\/(?:thinking|antml:thinking|reasoning)>/gi;
 const DATA_URI_RE = /data:[a-zA-Z0-9/+.-]+;base64,[A-Za-z0-9+/=]{100,}/g;
 const BASE64_RE = /\b[A-Za-z0-9+/]{180,}={0,2}\b/g;
 const PROGRESS_RE = /^.*(?:\[[#= >-]{6,}\]|[█▉▊▋▌▍▎▏░▒▓]{5,})\s*\d{1,3}%.*$/gm;
+
+// Web / component framework noise
+const NEXT_DATA_RE = /<script\b[^>]*id=["']__NEXT_DATA__["'][^>]*>[\s\S]*?<\/script>/gi;
+const SSR_STREAM_RE = /(?:self\.__next_f\.push|window\.__INITIAL_STATE__\s*=)\s*\(?[\s\S]{180,}?\)?(?:;|\n|$)/g;
 const SVG_STYLE_RE = /<(svg|style)\b[^>]*>[\s\S]*?<\/\1>/gi;
-const LONG_CLASS_RE = /\bclass=(["'])([^"']{80,})\1/gi;
-const RULE_LINE_RE = /^\s*(?:[-=_─━═┄┈|+┼┬┴├┤╭╮╰╯]{8,})\s*$/gm;
+const LONG_ATTR_RE = /\b(class|className|style|d)=(["'])([^"']{80,})\2/gi;
+const SCOPED_ATTR_RE = /\s+data-v-[0-9a-f]{6,}(?:="[^"]*")?/gi;
+
+// Docker / BuildKit & package manager chatter
+const DOCKER_LAYER_RE = /^\s*[0-9a-f]{8,16}:\s*(?:Pulling fs layer|Waiting|Verifying Checksum|Download complete|Pull complete|Already exists)\s*$/gim;
+const SHA256_RE = /\bsha256:[0-9a-f]{64}\b/gi;
 const NPM_WARN_RE = /^\s*(?:npm\s+(?:warn|notice)|warning\s+[^:\n]+:\s+deprecated)\b.*$/gim;
+
+// ORM / SQL pool notices & huge bound parameter lists
+const ORM_POOL_RE = /^\s*(?:prisma:info|sqlalchemy\.pool|hikari|pg-pool)\b.*(?:connection pool|acquired|idle|starting).*$/gim;
+const SQL_PARAMS_RE = /\b(params|parameters|bindings)\s*[:=]\s*\[[^\]]{140,}\]/gi;
+const SQL_IN_LIST_RE = /\bIN\s*\((?:\s*(?:\$\d+|\?|'[^']*'|\d+)\s*,){12,}\s*(?:\$\d+|\?|'[^']*'|\d+)\s*\)/gi;
+
+const RULE_LINE_RE = /^\s*(?:[-=_─━═┄┈|+┼┬┴├┤╭╮╰╯]{8,})\s*$/gm;
 const LIB_FRAME_RE = /^\s*at\s+.*(?:\bnode_modules\b|\bnode:internal\b|\binternal\/process\b|\bsite-packages\b|<anonymous>:\d+:\d+)/;
 const PASS_LINE_RE = /^\s*(?:[✓✔]|PASS\b|ok\s+\d+\s+-)\s+.+$/;
 const DIFF_HEADER_RE = /^diff --git a\/(\S+) b\/(\S+)/;
-const GENERATED_DIFF_RE = /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|go\.sum|[^/]+\.min\.(?:js|css)|[^/]+\.map|[^/]+\.snap)$/i;
+const GENERATED_DIFF_RE =
+  /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|go\.sum|dist\/|build\/|\.next\/|coverage\/|[^/]+\.min\.(?:js|css)|[^/]+\.map|[^/]+\.snap|[^/]+\.svg)$/i;
 
 const PRIORITY_KEYS = new Set([
   'id', 'name', 'title', 'type', 'role', 'status', 'code', 'ok',
   'error', 'errors', 'message', 'summary', 'reason', 'path', 'file',
   'line', 'command', 'exitCode', 'result', 'count', 'total'
 ]);
+
+const rcCache = new Map();
+
+export function loadRepoConfig(cwd = process.cwd()) {
+  const key = path.resolve(cwd);
+  if (rcCache.has(key)) return rcCache.get(key);
+
+  let cfg = { regexes: [], ignoreGlobs: [], maxTokens: null };
+  try {
+    const rcPath = path.join(key, '.clearbriefrc.json');
+    if (fs.existsSync(rcPath)) {
+      const parsed = JSON.parse(fs.readFileSync(rcPath, 'utf8'));
+      const regexes = Array.isArray(parsed.stripPatterns)
+        ? parsed.stripPatterns.map((p) => new RegExp(p, 'gm'))
+        : [];
+      cfg = {
+        regexes,
+        ignoreGlobs: Array.isArray(parsed.ignorePaths) ? parsed.ignorePaths : [],
+        maxTokens: Number(parsed.maxTokens) || null
+      };
+    }
+  } catch {
+    // Ignore malformed .clearbriefrc.json rather than breaking compression.
+  }
+
+  rcCache.set(key, cfg);
+  return cfg;
+}
+
+export function clearRepoConfigCache() {
+  rcCache.clear();
+}
 
 export function countTokens(text) {
   if (!text) return 0;
@@ -56,34 +107,48 @@ export function countTokens(text) {
   return Math.max(1, tokens);
 }
 
-// Drops lockfiles, sourcemaps, and minified bundles from git diffs while keeping real code hunks.
+const DIFF_META_RE = /^(?:index |--- |\+\+\+ |(?:old|new) mode|(?:new|deleted) file mode|similarity index|rename (?:from|to)|Binary files )/;
+
 export function slimDiff(text) {
   if (!text.includes('diff --git ')) return text;
 
   const lines = text.split('\n');
   const out = [];
   let skipFile = false;
+  let inHunk = false;
 
   for (const line of lines) {
     const m = line.match(DIFF_HEADER_RE);
     if (m) {
       const target = m[2];
+      inHunk = false;
       if (GENERATED_DIFF_RE.test(target)) {
         skipFile = true;
         out.push(`[diff omitted: ${target}]`);
         continue;
       }
       skipFile = false;
+      out.push(line);
+      continue;
     }
-    if (skipFile) continue;
-    // Drop git index hash headers (`index 83ab12..91cd04 100644`) — pure token waste.
+    if (skipFile) {
+      if (line.startsWith('@@ ')) {
+        inHunk = true;
+        continue;
+      }
+      if (DIFF_META_RE.test(line) || line.startsWith('+') || line.startsWith('-') || line.startsWith('\\ ')) {
+        continue;
+      }
+      if (inHunk && line.startsWith(' ')) continue;
+      skipFile = false;
+      inHunk = false;
+    }
     if (/^(?:index [0-9a-f]{6,}\.\.[0-9a-f]{6,}|similarity index \d+%)/i.test(line)) continue;
     out.push(line);
   }
   return out.join('\n');
 }
 
-// Collapses long runs of passing test lines while preserving every failure and assertion diff.
 export function slimTests(text) {
   const lines = text.split('\n');
   const out = [];
@@ -98,7 +163,6 @@ export function slimTests(text) {
       out.push(`[${passed} passing test lines omitted]`);
       passed = 0;
     } else if (passed > 0) {
-      // Keep 1-2 short PASS lines when there isn't a wall of them.
       out.push(`PASS (${passed} check${passed === 1 ? '' : 's'})`);
       passed = 0;
     }
@@ -110,7 +174,7 @@ export function slimTests(text) {
   return out.join('\n');
 }
 
-export function stripNoise(raw) {
+export function stripNoise(raw, cwd = process.cwd()) {
   if (!raw) return '';
   let text = String(raw).replace(/\r\n/g, '\n');
 
@@ -124,13 +188,26 @@ export function stripNoise(raw) {
   text = text
     .replace(ANSI_RE, '')
     .replace(THINKING_RE, '')
+    .replace(NEXT_DATA_RE, '[SSR state omitted]')
+    .replace(SSR_STREAM_RE, '[SSR payload omitted]\n')
     .replace(SVG_STYLE_RE, (_, tag) => `[<${tag}> omitted]`)
-    .replace(LONG_CLASS_RE, 'class="..."')
+    .replace(LONG_ATTR_RE, (_, attr) => `${attr}="..."`)
+    .replace(SCOPED_ATTR_RE, '')
     .replace(DATA_URI_RE, (m) => `[data-uri ${(m.length / 1024).toFixed(1)}KB omitted]`)
     .replace(BASE64_RE, (m) => `[blob ${(m.length / 1024).toFixed(1)}KB omitted]`)
+    .replace(DOCKER_LAYER_RE, '')
+    .replace(SHA256_RE, 'sha256:…')
+    .replace(ORM_POOL_RE, '')
+    .replace(SQL_PARAMS_RE, (_, label) => `${label}: […truncated]`)
+    .replace(SQL_IN_LIST_RE, 'IN (…items)')
     .replace(PROGRESS_RE, '')
     .replace(NPM_WARN_RE, '')
     .replace(RULE_LINE_RE, '');
+
+  const repoCfg = loadRepoConfig(cwd);
+  for (const rx of repoCfg.regexes) {
+    text = text.replace(rx, '');
+  }
 
   text = slimDiff(text);
   text = slimTests(text);
@@ -192,7 +269,6 @@ export function slimJson(val, depth = 0) {
   return kept ? out : undefined;
 }
 
-// Compact single-line JSON saves ~35% of tokens vs 2-space pretty-printed JSON.
 export function compressJson(text) {
   const t = text.trim();
   if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
@@ -215,6 +291,7 @@ function logSignature(line) {
     .replace(/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b/g, '<t>')
     .replace(/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/g, '<t>')
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<id>')
+    .replace(/^#\d+\s+\[[^\]]+\]\s*/g, '<step> ')
     .trim();
 }
 
@@ -280,7 +357,14 @@ export function fitBudget(text, maxTokens = 400) {
 
   const lines = text.split('\n');
   if (lines.length <= 2) {
-    return `${text.slice(0, Math.max(80, Math.floor(maxTokens * 3.3)))}…`;
+    let hi = text.length;
+    let lo = 0;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (countTokens(`${text.slice(0, mid)}…`) <= maxTokens) lo = mid;
+      else hi = mid - 1;
+    }
+    return `${text.slice(0, Math.max(20, lo))}…`;
   }
 
   const ranked = lines
@@ -325,7 +409,6 @@ export function fitBudget(text, maxTokens = 400) {
   };
 
   let joined = buildOut();
-  // Drop lowest-salience kept lines first (end of `chosen`), never high-salience tail frames.
   while (chosen.length > 1 && countTokens(joined) > maxTokens) {
     keep[chosen.pop()] = 0;
     joined = buildOut();
@@ -343,14 +426,16 @@ export function fitBudget(text, maxTokens = 400) {
   return joined;
 }
 
-export function compress(raw, maxTokens = 300) {
+export function compress(raw, maxTokens = 300, cwd = process.cwd()) {
   const input = String(raw || '');
   const rawTokens = countTokens(input);
+  const repoCfg = loadRepoConfig(cwd);
+  const ceiling = repoCfg.maxTokens ? Math.min(maxTokens, repoCfg.maxTokens) : maxTokens;
 
-  let text = stripNoise(input);
+  let text = stripNoise(input, cwd);
   text = compressJson(text);
   text = collapseLogs(text);
-  text = fitBudget(text, maxTokens);
+  text = fitBudget(text, ceiling);
 
   const finalTokens = countTokens(text);
   const savedTokens = Math.max(0, rawTokens - finalTokens);
